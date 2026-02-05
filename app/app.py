@@ -1,138 +1,150 @@
 import streamlit as st
-import pandas as pd
+import polars as pl
 import numpy as np
+import xgboost as xgb
 import joblib
 import os
-import tensorflow as tf
 import matplotlib.pyplot as plt
 import seaborn as sns
+import pandas as pd
 
-# CẤU HÌNH GIAO DIỆN
-st.set_page_config(page_title="Cyber Sentinel AI", page_icon="🛡️", layout="wide")
 
-# LOAD CÁC MODEL VÀ SCALER (CACHE ĐỂ KHÔNG LOAD LẠI MỖI LẦN)
+pd.set_option("styler.render.max_elements", 1_000_000)
+# CẤU HÌNH TRANG
+st.set_page_config(page_title="Cyber Sentinel v2.0", page_icon="🛡️", layout="wide")
+
+# --- HÀM LOAD MODEL & ASSETS ---
 @st.cache_resource
 def load_assets():
-    base_path = "../data/processed"
-    model_path = "../models"
+    # Lấy đường dẫn tuyệt đối của file app.py hiện tại
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    # Trỏ ngược ra thư mục cha (CYBER-SENTINEL), rồi vào models
+    model_path = os.path.join(current_dir, "..", "models")
     
-    # Load Scaler & Label Encoder
-    scaler = joblib.load(os.path.join(base_path, 'scaler.pkl'))
-    le = joblib.load(os.path.join(base_path, 'label_encoder.pkl'))
+    print(f"🔍 Đang tìm model tại: {model_path}")
     
-    # Load Models
+    # 1. Load XGBoost (Vua tốc độ)
+    xgb_model = xgb.XGBClassifier()
     try:
-        rf_model = joblib.load(os.path.join(model_path, 'RandomForest.pkl'))
-    except:
-        rf_model = None
+        json_path = os.path.join(model_path, "xgboost_model.json")
+        pkl_path = os.path.join(model_path, "xgboost_label_encoder.pkl")
         
-    try:
-        dl_model = tf.keras.models.load_model(os.path.join(model_path, 'ann_model.keras'))
-    except:
-        dl_model = None
+        # Kiểm tra file có tồn tại không trước khi load
+        if not os.path.exists(json_path):
+            print(f"❌ Không thấy file JSON tại: {json_path}")
+            return None, None
+            
+        xgb_model.load_model(json_path)
+        le_xgb = joblib.load(pkl_path)
+        print("✅ Load XGBoost thành công!")
+    except Exception as e:
+        print(f"❌ Lỗi load model: {e}")
+        xgb_model = None
+        le_xgb = None
         
-    return scaler, le, rf_model, dl_model
+    return xgb_model, le_xgb
 
-# GỌI HÀM LOAD
-scaler, le, rf_model, dl_model = load_assets()
+xgb_model, le_xgb = load_assets()
 
-# --- SIDEBAR (THANH ĐIỀU KHIỂN) ---
-st.sidebar.image("https://cdn-icons-png.flaticon.com/512/2092/2092663.png", width=100)
-st.sidebar.title("⚙️ Cấu hình Hệ thống")
-model_choice = st.sidebar.radio("Chọn Model AI:", ["Machine Learning (Random Forest)", "Deep Learning (ANN)"])
-confidence_threshold = st.sidebar.slider("Ngưỡng cảnh báo (%)", 0, 100, 50)
-
-# --- MAIN PAGE ---
-st.title("🛡️ CYBER SENTINEL - HỆ THỐNG PHÁT HIỆN XÂM NHẬP")
+# --- GIAO DIỆN ---
+st.title("🛡️ CYBER SENTINEL 2.0 - ENTERPRISE EDITION")
+st.markdown("### Hệ thống phát hiện xâm nhập thế hệ mới với Polars & XGBoost")
 st.markdown("---")
 
-# UPLOAD FILE
-uploaded_file = st.file_uploader("Tải lên file log mạng (CSV) để quét:", type=['csv'])
+# Sidebar
+st.sidebar.title("⚙️ Cấu hình")
+model_choice = st.sidebar.radio(
+    "Chọn Engine AI:", 
+    ["XGBoost (Recommended - 99% Acc)", "Deep Learning (Legacy)", "Random Forest (Legacy)"]
+)
+
+# Upload File
+uploaded_file = st.file_uploader("Tải lên log mạng (CSV):", type=['csv'])
 
 if uploaded_file is not None:
-    st.info("🚀 Đang phân tích gói tin...")
+    st.info("🚀 Đang xử lý dữ liệu siêu tốc bằng Polars...")
     
-    # 1. Đọc dữ liệu
     try:
-        input_df = pd.read_csv(uploaded_file)
-        # Xóa khoảng trắng thừa ở tên cột để khớp với Model
-        input_df.columns = input_df.columns.str.strip()
-        # Lấy mẫu ngẫu nhiên 50 dòng để demo cho nhanh nếu file quá nặng
-        if len(input_df) > 1000:
-            st.warning("⚠️ File quá lớn, hệ thống sẽ lấy mẫu 100 dòng đầu tiên để demo.")
-            display_df = input_df.head(100).copy()
-        else:
-            display_df = input_df.copy()
+        # 1. ĐỌC FILE BẰNG POLARS (Siêu nhanh)
+        # Polars đọc trực tiếp từ buffer upload
+        df = pl.read_csv(uploaded_file, ignore_errors=True)
+        
+        # Chuẩn hóa tên cột (Xóa khoảng trắng)
+        old_cols = df.columns
+        new_cols = [c.strip() for c in old_cols]
+        df = df.rename(dict(zip(old_cols, new_cols)))
+        
+        # Lấy mẫu nếu file quá lớn (> 5000 dòng)
+        if df.height > 5000:
+            st.warning(f"⚠️ File chứa {df.height} gói tin. Hệ thống sẽ lấy mẫu ngẫu nhiên 5000 gói để phân tích nhanh.")
+            df = df.sample(n=5000, seed=42)
             
-        # 2. Tiền xử lý (Giống hệt lúc Train)
-        # Lưu ý: Cần chọn đúng các cột Feature mà Model đã học. 
-        # Ở đây tôi giả định file upload có đủ cột. Trong thực tế cần bước map column.
-        
-        # Chỉ lấy các cột số để đưa vào model
-        X_input = display_df.select_dtypes(include=[np.number])
-        
-        # Xử lý số lượng cột (Nếu file upload khác số cột lúc train -> Lỗi)
-        # Đây là đoạn giả lập để code chạy được với file raw CIC-IDS:
-        # Cắt đúng 78 cột features (bỏ Label)
-        if X_input.shape[1] > 78:
-            X_input = X_input.iloc[:, :78] 
-            
-        # Chuẩn hóa
-        X_scaled = scaler.transform(X_input)
-        
-        # 3. Dự đoán
-        if model_choice == "Machine Learning (Random Forest)":
-            if rf_model:
-                y_pred = rf_model.predict(X_scaled)
-                # RF không trả về xác suất từng lớp dễ như DL, ta lấy predict thẳng
-                pred_labels = le.inverse_transform(y_pred)
-            else:
-                st.error("❌ Chưa tìm thấy file model Random Forest!")
+        # 2. TIỀN XỬ LÝ CHO XGBOOST
+        if "XGBoost" in model_choice:
+            if xgb_model is None:
+                st.error("❌ Không tìm thấy model XGBoost! Hãy chạy train_xgboost.py trước.")
                 st.stop()
                 
-        else: # Deep Learning
-            if dl_model:
-                y_probs = dl_model.predict(X_scaled)
-                y_pred_idx = np.argmax(y_probs, axis=1)
-                pred_labels = le.inverse_transform(y_pred_idx)
-            else:
-                st.error("❌ Chưa tìm thấy file model Deep Learning!")
-                st.stop()
-        
-        # 4. Hiển thị kết quả
-        display_df['AI Prediction'] = pred_labels
-        
-        # Thống kê
-        attack_counts = display_df['AI Prediction'].value_counts()
-        total_attacks = len(display_df) - attack_counts.get('BENIGN', 0)
-        
-        # KPI Cards
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Tổng gói tin quét", len(display_df))
-        col2.metric("Số lượng AN TOÀN", attack_counts.get('BENIGN', 0), delta_color="normal")
-        col3.metric("Số lượng CẢNH BÁO", total_attacks, delta_color="inverse")
-        
-        st.markdown("### 📊 Chi tiết phát hiện")
-        
-        # Tô màu: Đỏ nếu tấn công, Xanh nếu an toàn
-        def highlight_row(row):
-            return ['background-color: #ffcccc' if row['AI Prediction'] != 'BENIGN' else '' for _ in row]
-
-        st.dataframe(display_df.style.apply(highlight_row, axis=1))
-        
-        # Biểu đồ tròn
-        if total_attacks > 0:
-            st.markdown("### 📉 Phân bố loại tấn công")
-            fig, ax = plt.subplots()
-            # Bỏ BENIGN ra để xem rõ các loại tấn công
-            attack_only = display_df[display_df['AI Prediction'] != 'BENIGN']['AI Prediction'].value_counts()
-            ax.pie(attack_only, labels=attack_only.index, autopct='%1.1f%%', startangle=90, colors=sns.color_palette('pastel'))
-            ax.axis('equal')
-            st.pyplot(fig)
+            # Chỉ lấy cột số (Float/Int)
+            X_df = df.select(pl.col(pl.Float64, pl.Int64))
             
+            # Chuyển sang Numpy & Xử lý Vô cực (Inf)
+            X = X_df.to_numpy()
+            X[np.isinf(X)] = 0
+            X[np.isnan(X)] = 0
+            
+            # 3. DỰ ĐOÁN
+            y_pred_idx = xgb_model.predict(X)
+            
+            # Giải mã nhãn (0 -> BENIGN, 1 -> Bot...)
+            pred_labels = le_xgb.inverse_transform(y_pred_idx.astype(int))
+            
+            # Gán kết quả vào DataFrame để hiển thị
+            # Polars thao tác cột cực nhanh
+            df_display = df.with_columns(pl.Series(name="AI Prediction", values=pred_labels))
+            
+            # Chuyển về Pandas chỉ để hiển thị trên Streamlit (Streamlit chưa hỗ trợ Polars native tốt lắm)
+            display_pandas = df_display.to_pandas()
+            
+            # 4. THỐNG KÊ & HIỂN THỊ
+            st.success("✅ Phân tích hoàn tất!")
+            
+            # Đẩy các dòng Tấn công lên đầu
+            display_pandas['is_attack'] = display_pandas['AI Prediction'].apply(lambda x: 0 if x == 'BENIGN' else 1)
+            display_pandas = display_pandas.sort_values(by='is_attack', ascending=False).drop(columns=['is_attack'])
+            
+            # KPI Cards
+            attack_counts = display_pandas['AI Prediction'].value_counts()
+            total_attacks = len(display_pandas) - attack_counts.get('BENIGN', 0)
+            
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Tổng gói tin", len(display_pandas))
+            c2.metric("An toàn (BENIGN)", attack_counts.get('BENIGN', 0))
+            c3.metric("CẢNH BÁO TẤN CÔNG", total_attacks, delta_color="inverse")
+            
+            # Bảng màu
+            def highlight_row(row):
+                return ['background-color: #ffcccc' if row['AI Prediction'] != 'BENIGN' else '' for _ in row]
+                
+            st.dataframe(display_pandas.style.apply(highlight_row, axis=1))
+            
+            # Biểu đồ
+            if total_attacks > 0:
+                st.markdown("### 📉 Phân loại tấn công")
+                # Lọc bỏ BENIGN để biểu đồ tập trung vào tấn công
+                attack_only = display_pandas[display_pandas['AI Prediction'] != 'BENIGN']
+                
+                if not attack_only.empty:
+                    fig, ax = plt.subplots(figsize=(8, 4))
+                    sns.countplot(data=attack_only, y='AI Prediction', palette='viridis', order=attack_only['AI Prediction'].value_counts().index)
+                    plt.title("Thống kê các loại tấn công phát hiện được")
+                    st.pyplot(fig)
+
+        else:
+            st.info("⚠️ Chế độ Legacy (RandomForest/ANN) đang được bảo trì để nâng cấp lên Polars. Vui lòng chọn XGBoost.")
+
     except Exception as e:
-        st.error(f"Lỗi xử lý file: {e}")
-        st.info("Mẹo: Hãy chắc chắn file CSV upload lên có cấu trúc giống file CIC-IDS2017.")
+        st.error(f"Lỗi xử lý: {e}")
 
 else:
-    st.write("👈 Mời tải file CSV từ thanh bên trái để bắt đầu.")
+    st.write("👈 Mời tải file log mạng từ thanh bên trái.")
