@@ -1,0 +1,21 @@
+
+# --- FILE HỆ THỐNG & RÁC PYTHON ---
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.DS_Store
+
+# --- DỮ LIỆU  ---
+data/raw/*
+data/processed/*
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+
+# --- FILE MÔI TRƯỜNG ẢO ---
+venv/
+env/
+.env
+
+# --- CÁC ẢNH CHỤP MÀN HÌNH BÁO CÁO ---
+*.png
+*.jpg
